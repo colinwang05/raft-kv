@@ -1,0 +1,4 @@
+.claude/
+data/
+*.pb.go
+*_grpc.pb.go

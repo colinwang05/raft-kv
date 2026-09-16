@@ -2,6 +2,7 @@ package raft
 
 import (
 	"context"
+	"log"
 	"time"
 
 	pb "github.com/colinwang05/raft-kv/proto"
@@ -63,7 +64,7 @@ func (n *Node) replicateTo(ctx context.Context, peerID int) {
 	}
 	entries := make([]*pb.LogEntry, 0, uint64(len(n.log))-prevLogIndex)
 	for _, e := range n.log[prevLogIndex:] {
-		entries = append(entries, &pb.LogEntry{Index: e.Index, Term: e.Term})
+		entries = append(entries, &pb.LogEntry{Index: e.Index, Term: e.Term, Command: encodeCommand(e.Command)})
 	}
 	leaderCommit := n.commitIndex
 	n.mu.Unlock()
@@ -94,8 +95,38 @@ func (n *Node) replicateTo(ctx context.Context, peerID int) {
 	if resp.Success {
 		n.matchIndex[peerID] = resp.MatchIndex
 		n.nextIndex[peerID] = resp.MatchIndex + 1
+		n.maybeAdvanceCommitIndexLocked()
 	} else if n.nextIndex[peerID] > 1 {
 		n.nextIndex[peerID]--
+	}
+}
+
+// maybeAdvanceCommitIndexLocked recomputes commitIndex from matchIndex
+// across a majority of the cluster, honoring the Raft rule that a leader
+// only ever directly commits an entry from its own current term (Raft
+// paper §5.4.2 / design doc section 8) — never an older-term entry, even
+// if a majority already has it, since a future leader could still
+// overwrite it. Directly committing a current-term entry implicitly
+// commits every entry before it too. Caller must hold n.mu and this node
+// must currently be Leader.
+func (n *Node) maybeAdvanceCommitIndexLocked() {
+	total := len(n.peers) + 1
+	majority := total/2 + 1
+	for idx := n.lastLogIndex(); idx > n.commitIndex; idx-- {
+		count := 1 // the leader's own log always has everything up to lastLogIndex
+		for peerID := range n.peers {
+			if n.matchIndex[peerID] >= idx {
+				count++
+			}
+		}
+		if count >= majority {
+			if n.log[idx-1].Term == n.currentTerm {
+				old := n.commitIndex
+				n.commitIndex = idx
+				log.Printf("[node=%d term=%d state=%s] commit advanced old=%d new=%d", n.id, n.currentTerm, n.state, old, idx)
+			}
+			return // idx is the highest majority-replicated index — whether or not we committed it, no smaller idx can be committed either
+		}
 	}
 }
 
@@ -139,14 +170,11 @@ func (n *Node) AppendEntries(ctx context.Context, req *pb.AppendEntriesRequest) 
 }
 
 // toLogEntries converts wire-format log entries to internal LogEntry
-// values. Only Index/Term matter for log-consistency checks until the KV
-// API defines Command's wire format and starts producing real commands.
-//
-// TODO(M4): decode Command from entry.Command.
+// values, decoding each entry's Command payload.
 func toLogEntries(entries []*pb.LogEntry) []LogEntry {
 	out := make([]LogEntry, len(entries))
 	for i, e := range entries {
-		out[i] = LogEntry{Index: e.Index, Term: e.Term}
+		out[i] = LogEntry{Index: e.Index, Term: e.Term, Command: decodeCommand(e.Command)}
 	}
 	return out
 }

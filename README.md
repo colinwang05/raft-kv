@@ -8,13 +8,17 @@ This is a **framework scaffold**: package layout, types, and RPC contracts
 are in place; Raft logic itself (`// TODO` markers throughout `raft/` and
 `storage/`) is not yet implemented. Follow the milestone order below.
 
-M0 (config parsing, gRPC wiring), M1 (leader election), and M2 (heartbeats
-+ the full `AppendEntries` receiver, which also satisfies M3's log-
-consistency rules since it's the same RPC handler) are implemented and
-covered by tests — `go test ./...` is fully green. Leader-side log
-replication triggered by real client writes (M3's `replicateTo` sending
-non-empty entries, in practice) is still a no-op until the KV API (M4)
-produces commands to replicate.
+M0 (config parsing, gRPC wiring), M1 (leader election), M2 (heartbeats +
+the full `AppendEntries` receiver, which also satisfies M3's log-
+consistency rules since it's the same RPC handler), and M3 (leader-side
+log replication: `Propose` appends a command to the leader's own log,
+`replicateTo`/`AppendEntries` carry the real `Command` payload over the
+wire via a small gob codec, and `maybeAdvanceCommitIndexLocked` advances
+`commitIndex` from a majority of `matchIndex` — honoring the Raft rule
+that a leader only ever directly commits an entry from its own current
+term) are implemented and covered by tests — `go test ./...` is fully
+green. Producing real commands from client writes and applying committed
+entries to the KV state machine (M4's job) is still outstanding.
 
 ## Generate protobuf/gRPC code
 
@@ -64,6 +68,16 @@ go test ./... -race
   higher/same-term leader, prevLogTerm consistency checks, conflicting-
   suffix removal, and commit-index advancement (never decreasing, always
   `min(leaderCommit, lastNewEntryIndex)`). Now passing.
+- `raft/replication_test.go` (M3, leader-side replication): `Propose` on a
+  non-leader vs. a leader (index/term correctness, log growth), a
+  round-trip test for the `encodeCommand`/`decodeCommand` gob codec, and
+  `maybeAdvanceCommitIndexLocked` coverage including the Raft §5.4.2 safety
+  case — a majority-replicated older-term entry must *not* become
+  committed, only a current-term entry (which then implicitly commits
+  everything before it) — plus an end-to-end test on a real 3-`Node`
+  loopback cluster that proposes a command on a manually-installed leader,
+  drives `replicateTo` to both followers, and asserts the entry reaches
+  `commitIndex` with its `Command` correctly decoded on a follower's log.
 
 ## Milestones
 

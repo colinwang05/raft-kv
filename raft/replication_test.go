@@ -220,3 +220,185 @@ func TestAppendEntries_CommitIndexNeverDecreases(t *testing.T) {
 		t.Errorf("commitIndex = %d, want 2 (must never decrease)", n.commitIndex)
 	}
 }
+
+// --- M3: leader-side replication (Propose, majority commit) ---
+
+func TestPropose_NonLeaderReturnsFalseAndLeavesLogUnchanged(t *testing.T) {
+	n := newTestNode(1)
+	n.state = Follower
+	n.currentTerm = 3
+
+	_, _, isLeader := n.Propose(Command{Op: PUT, Key: "x", Value: "10"})
+	if isLeader {
+		t.Error("isLeader = true, want false: node is not the leader")
+	}
+	if len(n.log) != 0 {
+		t.Errorf("log = %v, want unchanged (empty)", n.log)
+	}
+}
+
+func TestPropose_LeaderAppendsWithCorrectIndexAndTerm(t *testing.T) {
+	n := newTestNode(1)
+	n.state = Leader
+	n.currentTerm = 4
+	n.log = []LogEntry{{Index: 1, Term: 1}, {Index: 2, Term: 3}}
+
+	index, term, isLeader := n.Propose(Command{Op: PUT, Key: "x", Value: "10"})
+	if !isLeader {
+		t.Fatal("isLeader = false, want true")
+	}
+	if index != 3 {
+		t.Errorf("index = %d, want 3 (lastLogIndex+1)", index)
+	}
+	if term != 4 {
+		t.Errorf("term = %d, want 4 (currentTerm)", term)
+	}
+	if len(n.log) != 3 {
+		t.Fatalf("log length = %d, want 3", len(n.log))
+	}
+	last := n.log[2]
+	if last.Index != 3 || last.Term != 4 || last.Command.Key != "x" || last.Command.Value != "10" {
+		t.Errorf("appended entry = %+v, want {Index:3 Term:4 Command:{PUT x 10}}", last)
+	}
+}
+
+func TestCommand_RoundTripsThroughEncodeDecode(t *testing.T) {
+	want := Command{Op: DELETE, Key: "foo", Value: "bar", ClientID: "client-1", RequestID: 42}
+	got := decodeCommand(encodeCommand(want))
+	if got != want {
+		t.Errorf("decodeCommand(encodeCommand(cmd)) = %+v, want %+v", got, want)
+	}
+}
+
+func TestCommand_DecodeEmptyBytesIsZeroCommand(t *testing.T) {
+	got := decodeCommand(nil)
+	if got != (Command{}) {
+		t.Errorf("decodeCommand(nil) = %+v, want zero Command", got)
+	}
+}
+
+func TestMaybeAdvanceCommitIndex_AdvancesOnMajorityCurrentTerm(t *testing.T) {
+	n := newTestNode(1)
+	n.state = Leader
+	n.currentTerm = 2
+	n.log = []LogEntry{{Index: 1, Term: 2}, {Index: 2, Term: 2}}
+	n.peers = map[int]RaftClient{2: nil, 3: nil, 4: nil} // total=4, majority=3
+	n.matchIndex = map[int]uint64{2: 2, 3: 2, 4: 0}      // leader(1) + 2 + 3 = 3 => majority
+
+	n.maybeAdvanceCommitIndexLocked()
+
+	if n.commitIndex != 2 {
+		t.Errorf("commitIndex = %d, want 2 (majority replicated a current-term entry)", n.commitIndex)
+	}
+}
+
+// TestMaybeAdvanceCommitIndex_DoesNotAdvanceToOlderTermEntry is the
+// Figure-8-style safety case the design doc calls out (Raft paper §5.4.2):
+// a leader must never directly commit an entry from an older term, even
+// when a majority of matchIndex already covers it, because a future leader
+// could still overwrite it.
+func TestMaybeAdvanceCommitIndex_DoesNotAdvanceToOlderTermEntry(t *testing.T) {
+	n := newTestNode(1)
+	n.state = Leader
+	n.currentTerm = 1
+	n.log = []LogEntry{{Index: 1, Term: 1}}
+	n.peers = map[int]RaftClient{2: nil, 3: nil} // total=3, majority=2
+	n.matchIndex = map[int]uint64{2: 1, 3: 1}    // leader(1) + 2 + 3 = 3 => majority already covers index 1
+
+	// Bump currentTerm to 2 without any term-2 entry yet appended (e.g. this
+	// node just won a new election). Index 1 is still term-1.
+	n.currentTerm = 2
+
+	n.maybeAdvanceCommitIndexLocked()
+
+	if n.commitIndex != 0 {
+		t.Errorf("commitIndex = %d, want 0: must not directly commit an older-term entry even with majority replication", n.commitIndex)
+	}
+
+	// Once a current-term entry is appended and reaches majority, it commits
+	// and implicitly commits the older-term entry before it too.
+	n.log = append(n.log, LogEntry{Index: 2, Term: 2})
+	n.matchIndex[2] = 2
+	n.matchIndex[3] = 2
+
+	n.maybeAdvanceCommitIndexLocked()
+
+	if n.commitIndex != 2 {
+		t.Errorf("commitIndex = %d, want 2: a current-term entry commits and implicitly commits everything before it", n.commitIndex)
+	}
+}
+
+func TestMaybeAdvanceCommitIndex_NeverRegressesAndRespectsExactMajority(t *testing.T) {
+	n := newTestNode(1)
+	n.state = Leader
+	n.currentTerm = 1
+	n.log = []LogEntry{{Index: 1, Term: 1}, {Index: 2, Term: 1}, {Index: 3, Term: 1}}
+	n.peers = map[int]RaftClient{2: nil, 3: nil, 4: nil} // total=4, majority=3
+	n.commitIndex = 2
+
+	// Only one peer (plus the leader) has index 3: leader(1) + peer2(1) = 2,
+	// which is short of majority=3, so commitIndex must not advance past 2.
+	n.matchIndex = map[int]uint64{2: 3, 3: 1, 4: 0}
+
+	n.maybeAdvanceCommitIndexLocked()
+
+	if n.commitIndex != 2 {
+		t.Errorf("commitIndex = %d, want 2 (unchanged: no majority for index 3, and must never regress)", n.commitIndex)
+	}
+}
+
+func TestReplication_E2E_ProposeReplicatesAndCommitsAcrossLoopbackCluster(t *testing.T) {
+	nodes := newLoopbackCluster(3)
+	leader := nodes[0]
+
+	// Manually install leader state (mirrors becomeLeader) rather than
+	// running a full election, for a deterministic test.
+	leader.mu.Lock()
+	leader.state = Leader
+	leader.currentTerm = 1
+	lastIndex := leader.lastLogIndex()
+	for peerID := range leader.peers {
+		leader.nextIndex[peerID] = lastIndex + 1
+		leader.matchIndex[peerID] = 0
+	}
+	leader.mu.Unlock()
+
+	cmd := Command{Op: PUT, Key: "x", Value: "10", ClientID: "c1", RequestID: 1}
+	index, term, isLeader := leader.Propose(cmd)
+	if !isLeader {
+		t.Fatal("Propose: isLeader = false, want true")
+	}
+	if index != 1 || term != 1 {
+		t.Fatalf("Propose returned index=%d term=%d, want index=1 term=1", index, term)
+	}
+
+	ctx := context.Background()
+	for _, n := range nodes {
+		if n.id == leader.id {
+			continue
+		}
+		leader.replicateTo(ctx, n.id)
+	}
+
+	leader.mu.Lock()
+	commitIndex := leader.commitIndex
+	leader.mu.Unlock()
+	if commitIndex != 1 {
+		t.Fatalf("leader commitIndex = %d, want 1 after replicating to a majority", commitIndex)
+	}
+
+	for _, n := range nodes {
+		if n.id == leader.id {
+			continue
+		}
+		n.mu.Lock()
+		gotLog := append([]LogEntry(nil), n.log...)
+		n.mu.Unlock()
+		if len(gotLog) != 1 {
+			t.Fatalf("follower %d log = %v, want 1 entry", n.id, gotLog)
+		}
+		if gotLog[0].Command != cmd {
+			t.Errorf("follower %d decoded command = %+v, want %+v", n.id, gotLog[0].Command, cmd)
+		}
+	}
+}

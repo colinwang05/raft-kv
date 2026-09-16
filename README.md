@@ -8,6 +8,9 @@ This is a **framework scaffold**: package layout, types, and RPC contracts
 are in place; Raft logic itself (`// TODO` markers throughout `raft/` and
 `storage/`) is not yet implemented. Follow the milestone order below.
 
+M0 (config parsing, gRPC wiring) and M1 (leader election) are implemented
+and covered by tests.
+
 ## Generate protobuf/gRPC code
 
 Required once before `go build ./...` will succeed, since `raft/transport.go`
@@ -31,6 +34,25 @@ go run ./cmd/server --id=2 --addr=localhost:8002 \
 go run ./cmd/server --id=3 --addr=localhost:8003 \
   --peers=1=localhost:8001,2=localhost:8002 --data=./data/node3
 ```
+
+## Testing
+
+```sh
+go test ./... -race
+```
+
+- `internal/config`: flag parsing and validation (`--id`/`--addr`/`--peers`/`--data`).
+- `raft`: `RequestVote` handler unit tests covering the design doc's
+  invariants (§21) — vote granted at most once per term, log-freshness
+  comparison, term never decreases, immediate step-down on a higher term —
+  plus a multi-node election safety test (`TestElectionSafety_AtMostOneLeaderPerTerm`)
+  using an in-memory loopback `RaftClient` (peer RPCs call the peer `Node`'s
+  handlers directly, no gRPC/network) to run real concurrent elections
+  deterministically and assert no term ever has two leaders.
+- Real-process integration tests (multi-node kill/restart, network delay,
+  failover) are deferred to M6 per the doc's own milestone split — the
+  loopback tests above give fast unit-level coverage of the same safety
+  properties in the meantime.
 
 ## Milestones
 

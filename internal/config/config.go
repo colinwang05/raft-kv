@@ -5,6 +5,7 @@ package config
 import (
 	"flag"
 	"fmt"
+	"os"
 	"strconv"
 	"strings"
 	"time"
@@ -35,11 +36,22 @@ type Config struct {
 //
 //	--id=1 --addr=localhost:8001 --peers=2=localhost:8002,3=localhost:8003 --data=./data/node1
 func ParseFlags() (*Config, error) {
-	id := flag.Int("id", 0, "this node's numeric ID (required)")
-	addr := flag.String("addr", "", "address this node listens on, e.g. localhost:8001 (required)")
-	peers := flag.String("peers", "", "comma-separated peerID=addr pairs, e.g. 2=localhost:8002,3=localhost:8003")
-	dataDir := flag.String("data", "", "directory for this node's WAL/metadata (required)")
-	flag.Parse()
+	return parseArgs(os.Args[0], os.Args[1:])
+}
+
+// parseArgs is the testable core of ParseFlags: it takes an explicit
+// argument slice and uses a fresh FlagSet per call, so (unlike registering
+// flags on the package-level flag.CommandLine) it can be called repeatedly
+// — e.g. once per test case — without panicking on redefined flags.
+func parseArgs(progName string, args []string) (*Config, error) {
+	fs := flag.NewFlagSet(progName, flag.ContinueOnError)
+	id := fs.Int("id", 0, "this node's numeric ID (required)")
+	addr := fs.String("addr", "", "address this node listens on, e.g. localhost:8001 (required)")
+	peers := fs.String("peers", "", "comma-separated peerID=addr pairs, e.g. 2=localhost:8002,3=localhost:8003")
+	dataDir := fs.String("data", "", "directory for this node's WAL/metadata (required)")
+	if err := fs.Parse(args); err != nil {
+		return nil, err
+	}
 
 	if *id == 0 {
 		return nil, fmt.Errorf("--id is required")

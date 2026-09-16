@@ -19,11 +19,12 @@ func main() {
 	}
 
 	_ = storage.NewWAL(cfg.DataDir)
-	_ = storage.NewKVStore()
+	store := storage.NewKVStore()
 	// TODO: load persisted metadata/log from the WAL before serving traffic
 	// (design doc section 11).
 
 	node := raft.NewNode(cfg)
+	node.SetApplier(store)
 	if err := node.Start(); err != nil {
 		log.Fatalf("start: %v", err)
 	}
@@ -35,7 +36,7 @@ func main() {
 
 	grpcServer := grpc.NewServer()
 	pb.RegisterRaftServiceServer(grpcServer, raft.NewServer(node))
-	// TODO: pb.RegisterKVServiceServer(grpcServer, kvServer)
+	pb.RegisterKVServiceServer(grpcServer, &kvServer{node: node, store: store})
 
 	log.Printf("[node=%d] listening on %s", cfg.ID, cfg.Addr)
 	if err := grpcServer.Serve(lis); err != nil {

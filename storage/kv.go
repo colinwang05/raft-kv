@@ -21,22 +21,33 @@ func NewKVStore() *KVStore {
 
 // Get returns the value for key, and whether it was present.
 func (s *KVStore) Get(key string) (string, bool) {
-	// TODO: implement.
-	return "", false
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	value, ok := s.data[key]
+	return value, ok
 }
 
 // Put sets key to value.
 func (s *KVStore) Put(key, value string) {
-	// TODO: implement.
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.data[key] = value
 }
 
 // Delete removes key.
 func (s *KVStore) Delete(key string) {
-	// TODO: implement.
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	delete(s.data, key)
 }
 
 // Apply applies one committed Command to the store. Must only be called by
 // the apply loop, strictly in increasing log-index order.
 func (s *KVStore) Apply(cmd raft.Command) {
-	// TODO: implement (switch on cmd.Op: PUT -> Put, DELETE -> Delete).
+	switch cmd.Op {
+	case raft.PUT:
+		s.Put(cmd.Key, cmd.Value)
+	case raft.DELETE:
+		s.Delete(cmd.Key)
+	}
 }

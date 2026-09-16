@@ -154,6 +154,7 @@ func (n *Node) becomeLeader(term uint64, votes, total int) {
 		return
 	}
 	n.state = Leader
+	n.leaderID = n.id
 	lastIndex := n.lastLogIndex()
 	for peerID := range n.peers {
 		n.nextIndex[peerID] = lastIndex + 1

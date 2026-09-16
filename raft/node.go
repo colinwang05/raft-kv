@@ -51,7 +51,12 @@ type Node struct {
 	log         []LogEntry
 	commitIndex uint64
 	lastApplied uint64
+	leaderID    int // 0 means "no leader observed yet"; last leader seen via becomeLeader or AppendEntries.
 	peers       map[int]RaftClient
+
+	// applier receives committed commands from runApplyLoop. May be nil
+	// (e.g. in unit tests that don't care about the KV state machine).
+	applier Applier
 
 	// Leader-only volatile state.
 	nextIndex  map[int]uint64
@@ -101,8 +106,31 @@ func (n *Node) Start() error {
 	n.cancel = cancel
 	go n.runElectionLoop(ctx)
 	go n.runHeartbeatLoop(ctx)
-	// TODO: go n.runApplyLoop(ctx)
+	go n.runApplyLoop(ctx)
 	return nil
+}
+
+// SetApplier wires the state machine that runApplyLoop delivers committed
+// commands to. Call once before Start().
+func (n *Node) SetApplier(a Applier) {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	n.applier = a
+}
+
+// IsLeader reports whether this node currently believes it is the leader.
+func (n *Node) IsLeader() bool {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	return n.state == Leader
+}
+
+// LeaderID returns the most recently observed leader's ID, or 0 if none
+// has been observed yet.
+func (n *Node) LeaderID() int {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	return n.leaderID
 }
 
 // resetElectionTimer signals the election loop to restart its randomized

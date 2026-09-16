@@ -153,6 +153,7 @@ func (n *Node) AppendEntries(ctx context.Context, req *pb.AppendEntriesRequest) 
 	// current term (never two leaders in the same term).
 	n.becomeFollowerLocked(req.Term)
 	n.resetElectionTimer()
+	n.leaderID = int(req.LeaderId)
 
 	if n.findConflict(req.PrevLogIndex, req.PrevLogTerm) {
 		return &pb.AppendEntriesResponse{Term: n.currentTerm, Success: false}, nil

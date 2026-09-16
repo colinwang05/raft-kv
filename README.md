@@ -10,15 +10,22 @@ are in place; Raft logic itself (`// TODO` markers throughout `raft/` and
 
 M0 (config parsing, gRPC wiring), M1 (leader election), M2 (heartbeats +
 the full `AppendEntries` receiver, which also satisfies M3's log-
-consistency rules since it's the same RPC handler), and M3 (leader-side
+consistency rules since it's the same RPC handler), M3 (leader-side
 log replication: `Propose` appends a command to the leader's own log,
 `replicateTo`/`AppendEntries` carry the real `Command` payload over the
 wire via a small gob codec, and `maybeAdvanceCommitIndexLocked` advances
 `commitIndex` from a majority of `matchIndex` — honoring the Raft rule
 that a leader only ever directly commits an entry from its own current
-term) are implemented and covered by tests — `go test ./...` is fully
-green. Producing real commands from client writes and applying committed
-entries to the KV state machine (M4's job) is still outstanding.
+term), and M4 (the KV API: `storage.KVStore` is a real in-memory map;
+`raft.runApplyLoop` applies committed entries to it in order via the new
+`Applier` interface; `cmd/server`'s `kvServer` wires `KVService`'s
+Put/Delete through `Node.Propose` + `Node.WaitApplied`, and serves Get
+directly from the leader's own store — a follower reports `leader_id` so
+the caller can redirect; `raftctl` (`cmd/client`) now actually issues
+these RPCs and follows `leader_id` redirects via a `--peers` address
+table) are implemented and covered by tests — `go test ./...` is fully
+green. Durable persistence across restarts (M5's job) is still
+outstanding.
 
 ## Generate protobuf/gRPC code
 
@@ -78,6 +85,16 @@ go test ./... -race
   loopback cluster that proposes a command on a manually-installed leader,
   drives `replicateTo` to both followers, and asserts the entry reaches
   `commitIndex` with its `Command` correctly decoded on a follower's log.
+- `storage/kv_test.go` and `raft/apply_test.go` (M4): `KVStore` Get/Put/
+  Delete/Apply dispatch; `runApplyLoop` applies committed entries strictly
+  in order and advances `lastApplied` (including with a `nil` `Applier`);
+  `WaitApplied` returns promptly once applied, and `false` on a timed-out
+  context.
+- `cmd/server/kvserver_test.go` (M4): a real single-node `*raft.Node` (zero
+  peers, so it elects itself immediately) exercised through the actual
+  `kvServer.Put`/`Get`/`Delete` handlers — round-trip, delete-then-not-found,
+  and the not-leader redirect path (forced via a real higher-term
+  `AppendEntries` call, matching what a legitimate peer would send).
 
 ## Milestones
 

@@ -24,7 +24,9 @@ func main() {
 	// (design doc section 11).
 
 	node := raft.NewNode(cfg)
-	node.Start()
+	if err := node.Start(); err != nil {
+		log.Fatalf("start: %v", err)
+	}
 
 	lis, err := net.Listen("tcp", cfg.Addr)
 	if err != nil {

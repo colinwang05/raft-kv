@@ -2,7 +2,13 @@
 // data directory, and Raft timing) from CLI flags.
 package config
 
-import "time"
+import (
+	"flag"
+	"fmt"
+	"strconv"
+	"strings"
+	"time"
+)
 
 // Default timing values (design doc section 14).
 const (
@@ -29,8 +35,57 @@ type Config struct {
 //
 //	--id=1 --addr=localhost:8001 --peers=2=localhost:8002,3=localhost:8003 --data=./data/node1
 func ParseFlags() (*Config, error) {
-	// TODO: define flag.Int/flag.String flags for id, addr, data;
-	// parse the comma-separated "id=addr" pairs in --peers into Peers;
-	// fill in HeartbeatInterval/ElectionTimeout*/RPCTimeout defaults.
-	return nil, nil
+	id := flag.Int("id", 0, "this node's numeric ID (required)")
+	addr := flag.String("addr", "", "address this node listens on, e.g. localhost:8001 (required)")
+	peers := flag.String("peers", "", "comma-separated peerID=addr pairs, e.g. 2=localhost:8002,3=localhost:8003")
+	dataDir := flag.String("data", "", "directory for this node's WAL/metadata (required)")
+	flag.Parse()
+
+	if *id == 0 {
+		return nil, fmt.Errorf("--id is required")
+	}
+	if *addr == "" {
+		return nil, fmt.Errorf("--addr is required")
+	}
+	if *dataDir == "" {
+		return nil, fmt.Errorf("--data is required")
+	}
+
+	peerMap, err := parsePeers(*peers)
+	if err != nil {
+		return nil, fmt.Errorf("--peers: %w", err)
+	}
+
+	return &Config{
+		ID:      *id,
+		Addr:    *addr,
+		Peers:   peerMap,
+		DataDir: *dataDir,
+
+		HeartbeatInterval:  DefaultHeartbeatInterval,
+		ElectionTimeoutMin: DefaultElectionTimeoutMin,
+		ElectionTimeoutMax: DefaultElectionTimeoutMax,
+		RPCTimeout:         DefaultRPCTimeout,
+	}, nil
+}
+
+// parsePeers parses "id=addr,id=addr,..." into a map. An empty string
+// yields an empty (non-nil) map.
+func parsePeers(s string) (map[int]string, error) {
+	peers := make(map[int]string)
+	if s == "" {
+		return peers, nil
+	}
+	for _, pair := range strings.Split(s, ",") {
+		idAddr := strings.SplitN(pair, "=", 2)
+		if len(idAddr) != 2 {
+			return nil, fmt.Errorf("malformed peer entry %q, want id=addr", pair)
+		}
+		peerID, err := strconv.Atoi(idAddr[0])
+		if err != nil {
+			return nil, fmt.Errorf("malformed peer id %q: %w", idAddr[0], err)
+		}
+		peers[peerID] = idAddr[1]
+	}
+	return peers, nil
 }

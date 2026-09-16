@@ -3,6 +3,7 @@
 package raft
 
 import (
+	"context"
 	"fmt"
 	"log"
 	"sync"
@@ -46,7 +47,7 @@ type Node struct {
 	id          int
 	state       State
 	currentTerm uint64
-	votedFor    int
+	votedFor    int // 0 means "no vote this term"; valid node IDs start at 1.
 	log         []LogEntry
 	commitIndex uint64
 	lastApplied uint64
@@ -57,6 +58,11 @@ type Node struct {
 	matchIndex map[int]uint64
 
 	cfg *config.Config
+
+	// resetElectionC signals the election loop to restart its timeout,
+	// e.g. after granting a vote or (from M2) receiving a valid heartbeat.
+	resetElectionC chan struct{}
+	cancel         context.CancelFunc
 }
 
 // NewNode constructs a Node from configuration. It does not start any
@@ -65,18 +71,19 @@ func NewNode(cfg *config.Config) *Node {
 	// TODO: load persistent state (currentTerm, votedFor, log) from the WAL
 	// before this node participates in any Raft traffic (design doc section 11).
 	return &Node{
-		id:         cfg.ID,
-		state:      Follower,
-		peers:      make(map[int]RaftClient),
-		nextIndex:  make(map[int]uint64),
-		matchIndex: make(map[int]uint64),
-		cfg:        cfg,
+		id:             cfg.ID,
+		state:          Follower,
+		peers:          make(map[int]RaftClient),
+		nextIndex:      make(map[int]uint64),
+		matchIndex:     make(map[int]uint64),
+		cfg:            cfg,
+		resetElectionC: make(chan struct{}, 1),
 	}
 }
 
-// Start connects to peers and logs the node's initial state. It does not
-// yet start the election/heartbeat/apply loops (design doc section 12) —
-// those land with leader election (M1) and replication (M2/M3).
+// Start connects to peers, logs the node's initial state, and launches the
+// election loop. Heartbeat/apply loops are not started yet (design doc
+// section 12) — those land with heartbeats (M2) and replication (M3).
 func (n *Node) Start() error {
 	peers, err := dialPeers(n.cfg)
 	if err != nil {
@@ -90,8 +97,31 @@ func (n *Node) Start() error {
 
 	log.Printf("[node=%d term=%d state=%s] started; peers=%v", n.id, term, state, n.cfg.Peers)
 
-	// TODO: go n.runElectionLoop(ctx)
+	ctx, cancel := context.WithCancel(context.Background())
+	n.cancel = cancel
+	go n.runElectionLoop(ctx)
 	// TODO: go n.runHeartbeatLoop(ctx)
 	// TODO: go n.runApplyLoop(ctx)
 	return nil
+}
+
+// resetElectionTimer signals the election loop to restart its randomized
+// timeout without blocking. Safe to call while holding n.mu.
+func (n *Node) resetElectionTimer() {
+	select {
+	case n.resetElectionC <- struct{}{}:
+	default:
+	}
+}
+
+// becomeFollowerLocked steps down to Follower, updating currentTerm and
+// clearing votedFor if newTerm is newer (design doc section 21: a server
+// observing a higher term immediately steps down). Caller must hold n.mu.
+func (n *Node) becomeFollowerLocked(newTerm uint64) {
+	if newTerm > n.currentTerm {
+		n.currentTerm = newTerm
+		n.votedFor = 0
+		// TODO(M5): persist currentTerm before sending/responding further.
+	}
+	n.state = Follower
 }

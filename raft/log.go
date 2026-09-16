@@ -33,9 +33,18 @@ func (n *Node) isLogUpToDate(candidateLastIndex, candidateLastTerm uint64) bool 
 
 // findConflict reports whether the entry at prevIndex does not have term
 // prevTerm (i.e. AppendEntries' consistency check fails), so the leader
-// must back up nextIndex (design doc sections 6 and 9).
+// must back up nextIndex (design doc sections 6 and 9). prevIndex == 0
+// always matches (no previous entry to check).
 //
-// TODO(M2/M3): implement alongside AppendEntries log replication.
+// Assumes the log has no gaps and starts at index 1 (n.log[i] has
+// Index == i+1); this holds until snapshot compaction is added (M8).
+// Caller must hold n.mu.
 func (n *Node) findConflict(prevIndex, prevTerm uint64) bool {
-	return false
+	if prevIndex == 0 {
+		return false
+	}
+	if prevIndex > uint64(len(n.log)) {
+		return true // we don't have an entry there at all
+	}
+	return n.log[prevIndex-1].Term != prevTerm
 }

@@ -100,7 +100,7 @@ func (n *Node) Start() error {
 	ctx, cancel := context.WithCancel(context.Background())
 	n.cancel = cancel
 	go n.runElectionLoop(ctx)
-	// TODO: go n.runHeartbeatLoop(ctx)
+	go n.runHeartbeatLoop(ctx)
 	// TODO: go n.runApplyLoop(ctx)
 	return nil
 }

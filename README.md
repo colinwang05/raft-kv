@@ -8,14 +8,13 @@ This is a **framework scaffold**: package layout, types, and RPC contracts
 are in place; Raft logic itself (`// TODO` markers throughout `raft/` and
 `storage/`) is not yet implemented. Follow the milestone order below.
 
-M0 (config parsing, gRPC wiring) and M1 (leader election) are implemented
-and covered by tests.
-
-`raft/replication_test.go` defines the contract for `AppendEntries` (M2
-heartbeats, M3 log replication) ahead of implementing it — **these tests
-currently fail on purpose** (`AppendEntries` is still a stub) and are
-expected to start passing as M2/M3 land, so `go test ./...` failing on
-`TestAppendEntries_*` right now is not a regression.
+M0 (config parsing, gRPC wiring), M1 (leader election), and M2 (heartbeats
++ the full `AppendEntries` receiver, which also satisfies M3's log-
+consistency rules since it's the same RPC handler) are implemented and
+covered by tests — `go test ./...` is fully green. Leader-side log
+replication triggered by real client writes (M3's `replicateTo` sending
+non-empty entries, in practice) is still a no-op until the KV API (M4)
+produces commands to replicate.
 
 ## Generate protobuf/gRPC code
 
@@ -59,13 +58,12 @@ go test ./... -race
   failover) are deferred to M6 per the doc's own milestone split — the
   loopback tests above give fast unit-level coverage of the same safety
   properties in the meantime.
-- `raft/replication_test.go` (M2/M3, `TestAppendEntries_*`): written ahead
-  of the implementation as the spec for `AppendEntries` — stale-term
+- `raft/replication_test.go` (M2/M3, `TestAppendEntries_*`): was written
+  ahead of the implementation as the spec for `AppendEntries` — stale-term
   rejection, heartbeat semantics, election-timer reset, step-down on a
   higher/same-term leader, prevLogTerm consistency checks, conflicting-
   suffix removal, and commit-index advancement (never decreasing, always
-  `min(leaderCommit, lastNewEntryIndex)`). Currently failing until M2/M3
-  are implemented — that's expected, not a regression.
+  `min(leaderCommit, lastNewEntryIndex)`). Now passing.
 
 ## Milestones
 

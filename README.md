@@ -30,7 +30,11 @@ recovers its term/vote/log from disk), and M6 (fault testing: a new
 over real gRPC — leader/follower crash, restart-and-catch-up, SIGSTOP/
 SIGCONT-simulated network delay, and repeated random kill/restart cycles,
 per the design doc's §16/§18 failure scenarios) are implemented and
-covered by tests — `go test ./...` is fully green.
+covered by tests — `go test ./...` is fully green. M7 (packaging) is in
+progress: `cmd/bench` (`raft-bench`), a standalone load-generating/
+failover-timing client, is done — see "## Benchmarking" below for usage
+and measured numbers; Dockerfile/Compose and the README demo walkthrough
+are still to come.
 
 ## Generate protobuf/gRPC code
 
@@ -55,6 +59,58 @@ go run ./cmd/server --id=2 --addr=localhost:8002 \
 go run ./cmd/server --id=3 --addr=localhost:8003 \
   --peers=1=localhost:8001,2=localhost:8002 --data=./data/node3
 ```
+
+## Benchmarking
+
+`cmd/bench` (`raft-bench`) is a standalone client — it never starts or
+kills nodes itself — that drives load against a cluster you already
+brought up (the three local nodes above, or a `docker compose` cluster
+once M7 adds one) to get real numbers instead of guessing them:
+
+```sh
+go build -o raft-bench ./cmd/bench
+
+# sustained throughput + latency percentiles, 20 concurrent writers for 10s
+./raft-bench throughput --peers=1=localhost:8001,2=localhost:8002,3=localhost:8003 \
+  --workers=20 --duration=10s
+
+# leader-failure recovery window: run this, then in another terminal kill
+# (or docker compose kill/stop) whichever node is currently the leader
+./raft-bench failover --peers=1=localhost:8001,2=localhost:8002,3=localhost:8003 \
+  --duration=30s
+```
+
+`throughput` runs N concurrent workers issuing PUTs (add `--read-pct` for
+a read mix) and reports ops/sec plus p50/p95/p99/max latency. `failover`
+probes with PUT every `--interval` (default 20ms) and reports the longest
+run of failed probes as a `[min, max]` bound on the actual outage — min is
+the span between the first and last failed probe, max extends to the
+nearest successful probes on either side, so true recovery time lies
+in between, resolution-limited by `--interval`.
+
+Measured on a single dev machine (all three nodes as local processes on
+loopback, default `HeartbeatInterval`/election-timeout config, `--workers
+20 --duration 10s`, values default 64B):
+
+- **Throughput: ~110-120 ops/sec**, p50 latency ~170ms. A single writer
+  alone gets ~100ms p50 — almost exactly `DefaultHeartbeatInterval`
+  (100ms, `internal/config/config.go`). That's not a fluke: `raft/
+  replication.go`'s replication loop only sends `AppendEntries` on a
+  fixed heartbeat ticker rather than immediately when `Propose` appends a
+  new entry, so a write's commit latency is dominated by waiting for the
+  next tick rather than by the actual network/fsync cost. Triggering
+  replication immediately on `Propose` (in addition to the periodic
+  heartbeat, which still needs to exist for idle keepalive/step-down
+  detection) would be the highest-leverage throughput fix, and is a good
+  M8 candidate — out of scope for the M7 benchmark harness itself, which
+  is deliberately just the measurement tool.
+- **Failover: ~400-600ms** client-visible unavailability window after a
+  hard `kill -9` of the leader, consistent with one election timeout plus
+  the time for the new leader's first heartbeat round to reach quorum.
+
+These are small-scale, single-machine numbers meant to characterize the
+current implementation, not a production benchmark — rerun both commands
+yourself for numbers that reflect your hardware and current code.
 
 ## Testing
 
@@ -180,7 +236,7 @@ go test ./... -race
 | M4 - KV API | PUT/DELETE through Raft, leader GET, apply loop, client redirect/retry behavior. |
 | M5 - Persistence | Durable term/vote/log, crash recovery, restart tests. **Done.** |
 | M6 - Fault testing | Kill/restart scripts, delayed RPCs, repeated failover tests, invariants. **Done.** |
-| M7 - Packaging | Dockerfile + Docker Compose, README demo, benchmark harness. |
+| M7 - Packaging | Dockerfile + Docker Compose, README demo, benchmark harness. **In progress** (benchmark harness done, see "## Benchmarking"; Dockerfile/Compose/demo still to come). |
 | M8 - Stretch | Snapshots/log compaction, conflict-index optimization, metrics, sharding. |
 
 Recommended immediate boundary: implement only M0-M2 first (see design doc

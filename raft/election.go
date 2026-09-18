@@ -69,9 +69,24 @@ func (n *Node) startElection(ctx context.Context) {
 	for id, c := range n.peers {
 		peers[id] = c
 	}
+	persister := n.persister
 	n.mu.Unlock()
 
-	// TODO(M5): persist currentTerm and votedFor before sending RequestVote RPCs.
+	if persister != nil {
+		if err := persister.SaveState(term, n.id); err != nil {
+			// No external actor has been told about this candidacy yet at
+			// this point in the function, so it's safe to leave the
+			// in-memory term/vote bump as-is without rolling back: if the
+			// process later crashes, reload will simply come back at the
+			// last successfully persisted term; if it doesn't crash, the
+			// next election timeout just tries again (burning a term
+			// number, which Raft tolerates fine — term numbers don't need
+			// to be contiguous). What we must not do is send RequestVote
+			// RPCs claiming a term/vote we failed to durably record.
+			log.Printf("[node=%d term=%d state=%s] persist state failed, aborting election: %v", n.id, term, Candidate, err)
+			return
+		}
+	}
 
 	log.Printf("[node=%d term=%d state=%s] election timeout; starting election", n.id, term, Candidate)
 
@@ -192,8 +207,23 @@ func (n *Node) RequestVote(ctx context.Context, req *pb.RequestVoteRequest) (*pb
 		return &pb.RequestVoteResponse{Term: n.currentTerm, VoteGranted: false}, nil
 	}
 
+	previousVote := n.votedFor
 	n.votedFor = candidateID
-	// TODO(M5): persist votedFor before returning vote_granted=true.
+	if n.persister != nil {
+		if err := n.persister.SaveState(n.currentTerm, candidateID); err != nil {
+			// Unlike startElection, this response IS the external
+			// observation: if we left votedFor mutated in memory without a
+			// successful durable write and just returned false, this node
+			// would be permanently stuck refusing every other candidate in
+			// this term too (in-memory votedFor would look "already
+			// committed" to someone). Roll back so memory stays truthful
+			// to what's durably known, so a later, different candidate (or
+			// a retry from this one) can still be granted.
+			n.votedFor = previousVote
+			log.Printf("[node=%d term=%d state=%s] persist vote failed, denying vote: %v", n.id, n.currentTerm, n.state, err)
+			return &pb.RequestVoteResponse{Term: n.currentTerm, VoteGranted: false}, nil
+		}
+	}
 	n.resetElectionTimer()
 
 	log.Printf("[node=%d term=%d state=%s] vote granted candidate=%d", n.id, n.currentTerm, n.state, candidateID)

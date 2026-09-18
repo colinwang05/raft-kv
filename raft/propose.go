@@ -20,6 +20,21 @@ func (n *Node) Propose(cmd Command) (index uint64, term uint64, isLeader bool) {
 	term = n.currentTerm
 	n.log = append(n.log, LogEntry{Index: index, Term: term, Command: cmd})
 
+	if n.persister != nil {
+		// Best-effort, log-only: unlike the receiver-side AppendEntries
+		// path, there's no explicit design-doc requirement gating
+		// Propose's own success on local durability — the entry's real
+		// durability guarantee comes from WaitApplied plus successful
+		// replication to (and persistence by) a majority of followers via
+		// the already-strict AppendEntries path. If the leader's own disk
+		// write fails here but replication elsewhere succeeds, the entry
+		// is still safe cluster-wide, so Propose's return contract
+		// (index, term, isLeader — no error) stays unchanged.
+		if err := n.persister.PersistLog(n.log); err != nil {
+			log.Printf("[node=%d term=%d state=%s] persist log failed: %v", n.id, n.currentTerm, n.state, err)
+		}
+	}
+
 	log.Printf("[node=%d term=%d state=%s] append index=%d command=%q", n.id, n.currentTerm, n.state, index, cmd)
 
 	// A lone leader with no peers (majority=1) should commit its own

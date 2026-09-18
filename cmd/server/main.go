@@ -18,12 +18,20 @@ func main() {
 		log.Fatalf("config: %v", err)
 	}
 
-	_ = storage.NewWAL(cfg.DataDir)
+	wal := storage.NewWAL(cfg.DataDir)
+	meta, err := wal.LoadMetadata()
+	if err != nil {
+		log.Fatalf("load metadata: %v", err)
+	}
+	restoredLog, err := wal.LoadLog()
+	if err != nil {
+		log.Fatalf("load log: %v", err)
+	}
 	store := storage.NewKVStore()
-	// TODO: load persisted metadata/log from the WAL before serving traffic
-	// (design doc section 11).
 
 	node := raft.NewNode(cfg)
+	node.RestoreState(meta.CurrentTerm, meta.VotedFor, restoredLog)
+	node.SetPersister(wal)
 	node.SetApplier(store)
 	if err := node.Start(); err != nil {
 		log.Fatalf("start: %v", err)

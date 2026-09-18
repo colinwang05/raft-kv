@@ -23,9 +23,16 @@ Put/Delete through `Node.Propose` + `Node.WaitApplied`, and serves Get
 directly from the leader's own store — a follower reports `leader_id` so
 the caller can redirect; `raftctl` (`cmd/client`) now actually issues
 these RPCs and follows `leader_id` redirects via a `--peers` address
-table) are implemented and covered by tests — `go test ./...` is fully
-green. Durable persistence across restarts (M5's job) is still
-outstanding.
+table), and M5 (persistence: `storage.WAL` durably persists currentTerm/
+votedFor (combined into one atomic `SaveState` write, since a vote is only
+meaningful in the context of the term it was cast in) and the full Raft
+log (`PersistLog` atomically rewrites the whole log file via temp-file +
+fsync + rename on every call that actually changes it — a `raft.Persister`
+interface keeps `raft` decoupled from `storage`, same pattern as
+`Applier`); `cmd/server/main.go` loads persisted state and calls
+`Node.RestoreState` before `Start()`, so a killed and restarted node
+recovers its term/vote/log from disk) are implemented and covered by
+tests — `go test ./...` is fully green.
 
 ## Generate protobuf/gRPC code
 
@@ -95,6 +102,35 @@ go test ./... -race
   `kvServer.Put`/`Get`/`Delete` handlers — round-trip, delete-then-not-found,
   and the not-leader redirect path (forced via a real higher-term
   `AppendEntries` call, matching what a legitimate peer would send).
+- `storage/wal_test.go` (M5): `SaveState`/`PersistLog` round-tripped
+  through a *fresh* `WAL` instance pointed at the same directory
+  (simulating a restart), including real `Command` payloads, not just
+  Index/Term; empty-directory first-boot behavior (zero value/`nil`, no
+  error); and a second `PersistLog` call with fewer entries than the first
+  (simulating a conflicting-suffix truncation) fully replacing the log
+  rather than leaving a stale mix.
+- `raft/persist_test.go` (M5, persistence-behavior/rollback, using a
+  `fakePersister` test double): `RequestVote` persists before granting,
+  and rolls back `votedFor` + denies the vote (with no permanent lockout —
+  proven by a subsequent grant to a different candidate) when persistence
+  fails; `AppendEntries` persists the full post-merge log only when the
+  log actually changed (asserted absent on a plain heartbeat, present on a
+  conflict-only truncation with zero new entries) and rolls back the log +
+  returns `Success: false` on a persist failure; `startElection` bumps
+  term/vote in memory even when persistence fails, without rolling back,
+  and sends no RequestVote RPCs in that case (observed via a counting
+  loopback-style peer).
+- `raft/restart_test.go` (M5, end-to-end, `package raft_test` to avoid the
+  raft/storage import cycle): a real single-node `*raft.Node` backed by a
+  real `*storage.WAL` and `*storage.KVStore` proposes and applies one
+  command, then a simulated restart (new `Node`+`WAL` over the same
+  directory, new empty `KVStore`, `RestoreState` loaded exactly as
+  `cmd/server/main.go` does) re-elects itself, proposes a second command,
+  and asserts the KVStore ends up with both the pre- and post-restart data
+  — proving the old entry was durably persisted, correctly reloaded, and
+  correctly gets implicitly committed (per the Raft §5.4.2/Figure-8 rule)
+  once a current-term entry also commits, rather than auto-committing on
+  restart alone (which would be incorrect).
 
 ## Milestones
 
@@ -105,7 +141,7 @@ go test ./... -race
 | M2 - Heartbeats | Leader sends empty AppendEntries; followers reset timeout; stale leaders step down. |
 | M3 - Log replication | Append commands, prevLog consistency check, nextIndex/matchIndex, majority commit. |
 | M4 - KV API | PUT/DELETE through Raft, leader GET, apply loop, client redirect/retry behavior. |
-| M5 - Persistence | Durable term/vote/log, crash recovery, restart tests. |
+| M5 - Persistence | Durable term/vote/log, crash recovery, restart tests. **Done.** |
 | M6 - Fault testing | Kill/restart scripts, delayed RPCs, repeated failover tests, invariants. |
 | M7 - Packaging | Dockerfile + Docker Compose, README demo, benchmark harness. |
 | M8 - Stretch | Snapshots/log compaction, conflict-index optimization, metrics, sharding. |

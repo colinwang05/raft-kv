@@ -58,6 +58,10 @@ type Node struct {
 	// (e.g. in unit tests that don't care about the KV state machine).
 	applier Applier
 
+	// persister durably records currentTerm/votedFor/log. May be nil (e.g.
+	// in unit tests that don't care about crash recovery).
+	persister Persister
+
 	// Leader-only volatile state.
 	nextIndex  map[int]uint64
 	matchIndex map[int]uint64
@@ -71,10 +75,10 @@ type Node struct {
 }
 
 // NewNode constructs a Node from configuration. It does not start any
-// background loops or persistence recovery; call Start for that.
+// background loops or persistence recovery; call Start for that. Callers
+// that need crash recovery should call SetPersister and RestoreState
+// (loading state from a WAL themselves) before Start — see cmd/server/main.go.
 func NewNode(cfg *config.Config) *Node {
-	// TODO: load persistent state (currentTerm, votedFor, log) from the WAL
-	// before this node participates in any Raft traffic (design doc section 11).
 	return &Node{
 		id:             cfg.ID,
 		state:          Follower,
@@ -118,6 +122,26 @@ func (n *Node) SetApplier(a Applier) {
 	n.applier = a
 }
 
+// SetPersister wires the durable store that Node persists currentTerm/
+// votedFor/log to. Call once before Start().
+func (n *Node) SetPersister(p Persister) {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	n.persister = p
+}
+
+// RestoreState installs Raft state loaded from a WAL by the caller (e.g.
+// cmd/server/main.go) before this node starts participating in any Raft
+// traffic (design doc section 11). Call once before Start(), after
+// SetPersister.
+func (n *Node) RestoreState(term uint64, votedFor int, log []LogEntry) {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	n.currentTerm = term
+	n.votedFor = votedFor
+	n.log = log
+}
+
 // IsLeader reports whether this node currently believes it is the leader.
 func (n *Node) IsLeader() bool {
 	n.mu.Lock()
@@ -149,7 +173,14 @@ func (n *Node) becomeFollowerLocked(newTerm uint64) {
 	if newTerm > n.currentTerm {
 		n.currentTerm = newTerm
 		n.votedFor = 0
-		// TODO(M5): persist currentTerm before sending/responding further.
+		if n.persister != nil {
+			// Best-effort: no external RPC response is riding on this
+			// specific call succeeding, and threading a rollback through
+			// becomeFollowerLocked's several call sites isn't worth it.
+			if err := n.persister.SaveState(newTerm, 0); err != nil {
+				log.Printf("[node=%d term=%d state=%s] persist state failed: %v", n.id, newTerm, n.state, err)
+			}
+		}
 	}
 	n.state = Follower
 }

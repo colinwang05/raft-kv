@@ -159,8 +159,35 @@ func (n *Node) AppendEntries(ctx context.Context, req *pb.AppendEntriesRequest) 
 		return &pb.AppendEntriesResponse{Term: n.currentTerm, Success: false}, nil
 	}
 
-	// TODO(M5): persist appended entries before returning success.
+	// Compute whether the log will actually change *before* mutating it: a
+	// steady-state heartbeat (no new entries, prevLogIndex already at the
+	// end of our log) is by far the most common AppendEntries call and
+	// must not trigger a full rewrite+fsync every ~100ms. A conflict-only
+	// truncation (a stale uncommitted suffix discarded even with zero new
+	// entries carried in this call) does still need persisting.
+	logChanged := req.PrevLogIndex < uint64(len(n.log)) || len(req.Entries) > 0
+	// A shallow "oldLog := n.log" is not a safe rollback value: Go's append
+	// below reuses n.log's backing array in place whenever it has spare
+	// capacity, which silently overwrites the very elements oldLog would
+	// still be pointing at. Only a deep copy survives as a true snapshot,
+	// and it's only needed when we might actually roll back.
+	var oldLog []LogEntry
+	if logChanged && n.persister != nil {
+		oldLog = append([]LogEntry(nil), n.log...)
+	}
 	n.log = append(n.log[:req.PrevLogIndex], toLogEntries(req.Entries)...)
+
+	if logChanged && n.persister != nil {
+		if err := n.persister.PersistLog(n.log); err != nil {
+			// Don't let this node's in-memory log claim durability it
+			// doesn't have: roll back so a future RequestVote freshness
+			// check or candidacy from this node only ever reflects what's
+			// actually on disk.
+			n.log = oldLog
+			log.Printf("[node=%d term=%d state=%s] persist log failed: %v", n.id, n.currentTerm, n.state, err)
+			return &pb.AppendEntriesResponse{Term: n.currentTerm, Success: false}, nil
+		}
+	}
 
 	lastNewIndex := n.lastLogIndex()
 	if req.LeaderCommit > n.commitIndex {

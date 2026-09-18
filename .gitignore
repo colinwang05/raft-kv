@@ -2,3 +2,5 @@
 data/
 *.pb.go
 *_grpc.pb.go
+/raftctl
+/raft-bench

@@ -1,0 +1,33 @@
+x-node: &node
+  build: .
+  # Each node binds 0.0.0.0 inside its own container (only that container's
+  # loopback would be reachable otherwise) but is reached by its peers, and
+  # by raftctl/raft-bench on the host, via the port mapping below — same
+  # ports as README's "Run three local nodes" section, so existing
+  # --peers=1=localhost:8001,... commands work unchanged against a compose
+  # cluster too.
+  restart: "no"
+
+services:
+  node1:
+    <<: *node
+    command: ["--id=1", "--addr=0.0.0.0:8001", "--peers=2=node2:8002,3=node3:8003", "--data=/data"]
+    ports: ["8001:8001"]
+    volumes: ["node1-data:/data"]
+
+  node2:
+    <<: *node
+    command: ["--id=2", "--addr=0.0.0.0:8002", "--peers=1=node1:8001,3=node3:8003", "--data=/data"]
+    ports: ["8002:8002"]
+    volumes: ["node2-data:/data"]
+
+  node3:
+    <<: *node
+    command: ["--id=3", "--addr=0.0.0.0:8003", "--peers=1=node1:8001,2=node2:8002", "--data=/data"]
+    ports: ["8003:8003"]
+    volumes: ["node3-data:/data"]
+
+volumes:
+  node1-data:
+  node2-data:
+  node3-data:

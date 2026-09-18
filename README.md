@@ -30,11 +30,13 @@ recovers its term/vote/log from disk), and M6 (fault testing: a new
 over real gRPC — leader/follower crash, restart-and-catch-up, SIGSTOP/
 SIGCONT-simulated network delay, and repeated random kill/restart cycles,
 per the design doc's §16/§18 failure scenarios) are implemented and
-covered by tests — `go test ./...` is fully green. M7 (packaging) is in
-progress: `cmd/bench` (`raft-bench`), a standalone load-generating/
-failover-timing client, is done — see "## Benchmarking" below for usage
-and measured numbers; Dockerfile/Compose and the README demo walkthrough
-are still to come.
+covered by tests — `go test ./...` is fully green. M7 (packaging) is
+done: a `Dockerfile` + `docker-compose.yml` bring up a real 3-node
+cluster with one command (see "## Docker Compose demo" below — the
+design doc's §22 V1 finish line, manually verified end-to-end: write,
+kill the leader, re-elect, read the same data back), and `cmd/bench`
+(`raft-bench`), a standalone load-generating/failover-timing client, is
+done — see "## Benchmarking" for usage and measured numbers.
 
 ## Generate protobuf/gRPC code
 
@@ -46,8 +48,15 @@ brew install go protobuf grpcurl
 go install google.golang.org/protobuf/cmd/protoc-gen-go@latest
 go install google.golang.org/grpc/cmd/protoc-gen-go-grpc@latest
 
-protoc --go_out=. --go-grpc_out=. proto/raft.proto
+protoc --go_out=. --go_opt=paths=source_relative \
+  --go-grpc_out=. --go-grpc_opt=paths=source_relative \
+  proto/raft.proto
 ```
+
+(`paths=source_relative` matters: without it, `protoc-gen-go` writes the
+generated files under a `github.com/colinwang05/raft-kv/proto/` path
+derived from `raft.proto`'s `go_package` option, instead of `./proto/`
+where `go build` actually looks for them.)
 
 ## Run three local nodes
 
@@ -60,12 +69,64 @@ go run ./cmd/server --id=3 --addr=localhost:8003 \
   --peers=1=localhost:8001,2=localhost:8002 --data=./data/node3
 ```
 
+## Docker Compose demo
+
+This is the design doc's §22 V1 finish line: bring up a 3-node cluster
+with one command, write through whichever node happens to be leader,
+kill it, and get the same data back from whoever wins the re-election.
+Requires Docker; nothing else.
+
+```sh
+docker compose up -d
+docker compose logs | grep LEADER   # see who won
+
+go build -o raftctl ./cmd/client
+./raftctl --addr=localhost:8001 --peers=1=localhost:8001,2=localhost:8002,3=localhost:8003 \
+  put name Colin
+
+docker compose kill node2           # substitute whichever node is actually leader
+./raftctl --addr=localhost:8001 --peers=1=localhost:8001,2=localhost:8002,3=localhost:8003 \
+  get name                          # -> Colin, from whichever node won the re-election
+
+docker compose start node2          # rejoins as a follower (or may re-win the election —
+                                     # see the note below) and catches up either way
+```
+
+Each node's own `--addr` binds `0.0.0.0` inside its container (so the
+other containers, reachable by their Compose service name, and the host,
+reachable via the port mapping, can both connect) while `--peers`
+addresses every other node by its service name — see `docker-compose.yml`.
+Ports are mapped 1:1 to the same `800N` ports the "Run three local nodes"
+section above uses, and each node's data directory is a named volume, so
+`raftctl`/`raft-bench` commands work unchanged against either a local or
+a Compose cluster, and a `docker compose kill`/`start` round-trip
+preserves that node's log across the restart the same way killing and
+restarting a local process does.
+
+**A restarted node can win the re-election and briefly "lose" old
+data — this is correct, not a bug.** If the node you `start` back up
+times out and calls its own election before it receives a heartbeat from
+whoever's currently leading, it can win (its restored log is caught up,
+so its vote request is legitimate, and Raft requires the others to step
+down for a higher term) — but as a *freshly restarted* leader it hasn't
+re-established `commitIndex` yet, and per Raft's §5.4.2 "Figure 8" safety
+rule (exercised in `raft/replication_test.go` and used deliberately by
+`integration/`'s `nudge()` helper) a leader only directly commits an
+entry from its own current term. So a `get` right after this happens can
+legitimately return not-found until *something* commits in the new
+term — issue one more `put` (any key) to "nudge" it, which implicitly
+commits everything before it too, and the old data reappears. Reproduced
+live while writing this section: `get name` returned not-found
+immediately after `node3` restarted and re-won an election, then
+returned `Colin` again right after one `put __nudge__ 1`.
+
 ## Benchmarking
 
 `cmd/bench` (`raft-bench`) is a standalone client — it never starts or
 kills nodes itself — that drives load against a cluster you already
-brought up (the three local nodes above, or a `docker compose` cluster
-once M7 adds one) to get real numbers instead of guessing them:
+brought up — the three local nodes above, or the `docker compose` cluster
+from "## Docker Compose demo" — to get real numbers instead of guessing
+them:
 
 ```sh
 go build -o raft-bench ./cmd/bench
@@ -107,6 +168,19 @@ loopback, default `HeartbeatInterval`/election-timeout config, `--workers
 - **Failover: ~400-600ms** client-visible unavailability window after a
   hard `kill -9` of the leader, consistent with one election timeout plus
   the time for the new leader's first heartbeat round to reach quorum.
+
+Rerun against the `docker compose` cluster instead (same `raft-bench`
+commands, `localhost:800N` still resolves — see "## Docker Compose
+demo") and the numbers move: **~190 ops/sec / ~102ms p50** (`docker
+compose kill node2`, then `raft-bench throughput`) — faster, not slower,
+than bare local processes, most likely down to how the container
+runtime's disk layer handles the WAL's fsync-per-write compared to the
+host filesystem directly; and **~880ms-1.06s failover** (`raft-bench
+failover`, killed the leader with `docker compose kill`) — slower than
+bare processes, plausibly extra latency in a client's gRPC connection
+noticing the killed container's port is gone through Docker's virtual
+network. Neither number is a regression or a bug; they're a genuinely
+different environment.
 
 These are small-scale, single-machine numbers meant to characterize the
 current implementation, not a production benchmark — rerun both commands
@@ -236,7 +310,7 @@ go test ./... -race
 | M4 - KV API | PUT/DELETE through Raft, leader GET, apply loop, client redirect/retry behavior. |
 | M5 - Persistence | Durable term/vote/log, crash recovery, restart tests. **Done.** |
 | M6 - Fault testing | Kill/restart scripts, delayed RPCs, repeated failover tests, invariants. **Done.** |
-| M7 - Packaging | Dockerfile + Docker Compose, README demo, benchmark harness. **In progress** (benchmark harness done, see "## Benchmarking"; Dockerfile/Compose/demo still to come). |
+| M7 - Packaging | Dockerfile + Docker Compose, README demo, benchmark harness. **Done.** |
 | M8 - Stretch | Snapshots/log compaction, conflict-index optimization, metrics, sharding. |
 
 Recommended immediate boundary: implement only M0-M2 first (see design doc

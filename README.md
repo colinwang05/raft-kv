@@ -1,8 +1,6 @@
 # raft-kv
 
-A fault-tolerant replicated key-value store using Raft consensus. See
-`raft_kv_design (1).docx` for the full design (architecture, RPC contract,
-invariants, milestones).
+A fault-tolerant replicated key-value store using Raft consensus.
 
 This is a **framework scaffold**: package layout, types, and RPC contracts
 are in place; Raft logic itself (`// TODO` markers throughout `raft/` and

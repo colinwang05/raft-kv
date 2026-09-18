@@ -191,7 +191,9 @@ func (n *Node) AppendEntries(ctx context.Context, req *pb.AppendEntriesRequest) 
 
 	lastNewIndex := n.lastLogIndex()
 	if req.LeaderCommit > n.commitIndex {
+		old := n.commitIndex
 		n.commitIndex = min(req.LeaderCommit, lastNewIndex)
+		log.Printf("[node=%d term=%d state=%s] commit advanced old=%d new=%d", n.id, n.currentTerm, n.state, old, n.commitIndex)
 	}
 
 	return &pb.AppendEntriesResponse{Term: n.currentTerm, Success: true, MatchIndex: lastNewIndex}, nil

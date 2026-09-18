@@ -2,10 +2,6 @@
 
 A fault-tolerant replicated key-value store using Raft consensus.
 
-This is a **framework scaffold**: package layout, types, and RPC contracts
-are in place; Raft logic itself (`// TODO` markers throughout `raft/` and
-`storage/`) is not yet implemented. Follow the milestone order below.
-
 M0 (config parsing, gRPC wiring), M1 (leader election), M2 (heartbeats +
 the full `AppendEntries` receiver, which also satisfies M3's log-
 consistency rules since it's the same RPC handler), M3 (leader-side
@@ -29,8 +25,12 @@ fsync + rename on every call that actually changes it — a `raft.Persister`
 interface keeps `raft` decoupled from `storage`, same pattern as
 `Applier`); `cmd/server/main.go` loads persisted state and calls
 `Node.RestoreState` before `Start()`, so a killed and restarted node
-recovers its term/vote/log from disk) are implemented and covered by
-tests — `go test ./...` is fully green.
+recovers its term/vote/log from disk), and M6 (fault testing: a new
+`integration/` package drives real `cmd/server`/`raftctl` OS processes
+over real gRPC — leader/follower crash, restart-and-catch-up, SIGSTOP/
+SIGCONT-simulated network delay, and repeated random kill/restart cycles,
+per the design doc's §16/§18 failure scenarios) are implemented and
+covered by tests — `go test ./...` is fully green.
 
 ## Generate protobuf/gRPC code
 
@@ -70,10 +70,10 @@ go test ./... -race
   using an in-memory loopback `RaftClient` (peer RPCs call the peer `Node`'s
   handlers directly, no gRPC/network) to run real concurrent elections
   deterministically and assert no term ever has two leaders.
-- Real-process integration tests (multi-node kill/restart, network delay,
-  failover) are deferred to M6 per the doc's own milestone split — the
-  loopback tests above give fast unit-level coverage of the same safety
-  properties in the meantime.
+- Real-process integration/chaos tests (multi-node kill/restart, network
+  delay, failover) are implemented in `integration/` (M6) — see below;
+  the loopback test above gives fast, deterministic unit-level coverage
+  of the same election-safety property in the meantime/in addition.
 - `raft/replication_test.go` (M2/M3, `TestAppendEntries_*`): was written
   ahead of the implementation as the spec for `AppendEntries` — stale-term
   rejection, heartbeat semantics, election-timer reset, step-down on a
@@ -129,6 +129,45 @@ go test ./... -race
   correctly gets implicitly committed (per the Raft §5.4.2/Figure-8 rule)
   once a current-term entry also commits, rather than auto-committing on
   restart alone (which would be incorrect).
+- `integration/` (M6, `package integration`, real processes/real gRPC):
+  unlike every test above, this drives actual `cmd/server` OS processes
+  over real TCP/gRPC, through the real `raftctl` (`cmd/client`) binary as
+  a subprocess (so it re-validates the actual CLI, not a hand-rolled test
+  client) rather than the in-memory loopback transport. `TestMain` builds
+  both binaries once into a temp dir; each test spins up a 3-node cluster
+  on dynamic free ports with per-node `t.TempDir()` data dirs, and tracks
+  every spawned PID so `t.Cleanup` can force-kill them even if a test
+  fails partway through. It uses the project's real (unsped-up) timing
+  defaults — no test-only config flags — so it's noticeably slower than
+  the rest of the suite; run it on its own with:
+  ```sh
+  go test ./integration/... -v
+  ```
+  It's gated behind `testing.Short()` (skipped by `go test ./... -short`)
+  so routine iteration stays fast; `go test ./...` (no `-short`) runs it.
+  Covers design doc §18's list: exactly one stable leader among 3 real
+  nodes; a PUT surviving a leader crash (readable from the new leader
+  once it commits an entry of its own term, per the Figure-8 rule above);
+  a follower crash not blocking commits; a killed-and-restarted follower
+  catching up; a restarted former leader rejoining as a follower and
+  converging; a `SIGSTOP`/`SIGCONT`-paused node (simulating an unreachable/
+  slow peer without any network-namespace tooling) catching up once
+  resumed; and repeated random kill/restart cycles across many rounds
+  never losing a write `raftctl` actually reported as acknowledged. A
+  dedicated real-process split-vote test is deliberately not included —
+  `raft.TestElectionSafety_AtMostOneLeaderPerTerm` already proves that
+  safety property deterministically over the loopback transport, and
+  forcing a genuine split vote with real OS-level timing would be flaky
+  for little additional coverage.
+  Two small additive logging changes support this package's black-box
+  observability technique — asking "did this specific node apply up to
+  index N" by grepping its captured stdout, since `KVService.Get` is
+  deliberately leader-only and no debug RPC was added for this: a follower's
+  own `commitIndex` advance in `AppendEntries` (`raft/replication.go`) now
+  logs `"commit advanced old=%d new=%d"`, matching the leader-side line
+  that already existed; and the apply loop (`raft/apply.go`) now logs
+  `"applied index=%d"` per entry it applies. Neither changes any return
+  value or control flow.
 
 ## Milestones
 
@@ -140,7 +179,7 @@ go test ./... -race
 | M3 - Log replication | Append commands, prevLog consistency check, nextIndex/matchIndex, majority commit. |
 | M4 - KV API | PUT/DELETE through Raft, leader GET, apply loop, client redirect/retry behavior. |
 | M5 - Persistence | Durable term/vote/log, crash recovery, restart tests. **Done.** |
-| M6 - Fault testing | Kill/restart scripts, delayed RPCs, repeated failover tests, invariants. |
+| M6 - Fault testing | Kill/restart scripts, delayed RPCs, repeated failover tests, invariants. **Done.** |
 | M7 - Packaging | Dockerfile + Docker Compose, README demo, benchmark harness. |
 | M8 - Stretch | Snapshots/log compaction, conflict-index optimization, metrics, sharding. |
 

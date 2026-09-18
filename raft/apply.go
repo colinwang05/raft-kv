@@ -2,6 +2,7 @@ package raft
 
 import (
 	"context"
+	"log"
 	"time"
 )
 
@@ -78,7 +79,9 @@ func (n *Node) applyPending() {
 		}
 		n.mu.Lock()
 		n.lastApplied = e.Index
+		id, term, state := n.id, n.currentTerm, n.state
 		n.mu.Unlock()
+		log.Printf("[node=%d term=%d state=%s] applied index=%d", id, term, state, e.Index)
 	}
 }
 

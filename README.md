@@ -66,7 +66,7 @@ go run ./cmd/server --id=3 --addr=localhost:8003 \
 One-time setup first — generate the protobuf/gRPC code:
 
 ```sh
-brew install go protobuf
+brew install go protobuf grpcurl
 go install google.golang.org/protobuf/cmd/protoc-gen-go@latest
 go install google.golang.org/grpc/cmd/protoc-gen-go-grpc@latest
 

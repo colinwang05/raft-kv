@@ -178,7 +178,6 @@ func (n *Node) becomeLeader(term uint64, votes, total int) {
 	n.mu.Unlock()
 
 	log.Printf("[node=%d term=%d state=%s] won election votes=%d/%d", n.id, term, Leader, votes, total)
-	// TODO(M2): start heartbeat loop to establish authority and prevent new elections.
 }
 
 // RequestVote implements the RaftService RPC handler (design doc section 6).

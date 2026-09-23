@@ -6,9 +6,9 @@ import (
 	"net"
 
 	"github.com/colinwang05/raft-kv/internal/config"
+	pb "github.com/colinwang05/raft-kv/proto"
 	"github.com/colinwang05/raft-kv/raft"
 	"github.com/colinwang05/raft-kv/storage"
-	pb "github.com/colinwang05/raft-kv/proto"
 	"google.golang.org/grpc"
 )
 
